@@ -128,17 +128,14 @@ func (c *Client) loadIndex() error {
 	if c.loaded {
 		return nil
 	}
-	var raw []any
+	var raw map[string]any
 	if err := c.request("GET", "/files/path-index", nil, &raw); err != nil {
 		return err
 	}
 
-	for i := 0; i+entrySize <= len(raw); i += entrySize {
-		entry := raw[i : i+entrySize]
-		uuid, _ := entry[IdxUUID].(string)
-		p := entryToPath(entry)
-		c.index[strings.ToLower(p)] = uuid
-		c.entries[uuid] = clone(entry)
+	for k, v := range raw["index"].(map[string]any) {
+		fmt.Println(k, v)
+		c.index[cleanPath(k)] = v.(string)
 	}
 
 	c.loaded = true
@@ -146,13 +143,28 @@ func (c *Client) loadIndex() error {
 }
 
 func entryToPath(e FileEntry) string {
-	location := strings.ToLower(fmt.Sprint(e[IdxLocation]))
-	location = strings.TrimPrefix(location, "origin/(c) users/")
+	location := fmt.Sprint(e[IdxLocation])
+	name := fmt.Sprint(e[IdxName])
+	typ := fmt.Sprint(e[IdxType])
+	return cleanPath(strings.TrimPrefix(location, "/") + "/" + fmt.Sprintf("%v%v", name, typ))
+}
 
-	username := location[0:strings.Index(location, "/")]
-	location = strings.TrimPrefix(location, username+"/")
+func cleanPath(p string) string {
+	p = strings.ToLower(p)
+	p = strings.TrimPrefix(p, "origin/(c) users/")
 
-	return strings.ToLower(path.Join("/", strings.TrimPrefix(location, "/"), fmt.Sprintf("%v%v", e[IdxName], e[IdxType])))
+	fmt.Println(1, p)
+
+	parts := strings.SplitN(p, "/", 2)
+	if len(parts) == 2 {
+		p = parts[1]
+	} else {
+		p = ""
+	}
+
+	fmt.Println(2, p)
+
+	return path.Clean("/" + p)
 }
 
 func clone(e FileEntry) FileEntry {
@@ -304,51 +316,46 @@ func (c *Client) CreateFolder(p string) error {
 	return nil
 }
 
-func (c *Client) ListDir(p string) ([]string, error) {
-	p = strings.ToLower(p)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if err := c.loadIndex(); err != nil {
-		return nil, err
+func (c *Client) ListDir(p string) []string {
+	p = strings.TrimSuffix(strings.ToLower(p), "/")
+	if p == "" {
+		p = "/"
 	}
 
-	uuid, ok := c.index[p]
-	if !ok {
-		return nil, errors.New("directory not found")
+	paths, err := c.ListPaths()
+	if err != nil {
+		return []string{}
 	}
 
-	entry := c.entries[uuid]
+	children := make(map[string]struct{})
 
-	if fmt.Sprint(entry[IdxType]) != ".folder" {
-		return nil, errors.New("not a directory")
+	prefix := p
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
 	}
 
-	rawData, ok := entry[IdxData].([]any)
-	if !ok {
-		return nil, errors.New("invalid folder data")
-	}
-
-	names := make([]string, 0, len(rawData))
-	for _, v := range rawData {
-		if childUUID, ok := v.(string); ok {
-			if childEntry, exists := c.entries[childUUID]; exists {
-				name := fmt.Sprintf("%v%v", childEntry[IdxName], childEntry[IdxType])
-				names = append(names, name)
-			}
+	for _, fullPath := range paths {
+		fullPath = strings.ToLower(fullPath)
+		if strings.HasPrefix(fullPath, prefix) {
+			rest := strings.TrimPrefix(fullPath, prefix)
+			parts := strings.SplitN(rest, "/", 2)
+			child := parts[0]
+			children[child] = struct{}{}
 		}
 	}
 
-	return names, nil
+	out := make([]string, 0, len(children))
+	for k := range children {
+		out = append(out, k)
+	}
+
+	return out
 }
 
 func (c *Client) Remove(p string) error {
 	p = strings.ToLower(p)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.loadIndex(); err != nil {
-		return err
-	}
 	uuid, ok := c.index[p]
 	if !ok {
 		return errors.New("not found")
