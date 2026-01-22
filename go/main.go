@@ -182,6 +182,38 @@ func (c *Client) WriteFile(p string, data string) error {
 	return errors.New("create via CreateFile")
 }
 
+func (c *Client) createFolders(dir string) error {
+	dir = strings.TrimSuffix(dir, "/")
+	if dir == "" || dir == "/" {
+		return nil
+	}
+
+	parts := strings.Split(dir, "/")
+	for i := 1; i <= len(parts); i++ {
+		subPath := path.Join(parts[:i]...)
+		if !strings.HasPrefix(subPath, "/") {
+			subPath = "/" + subPath
+		}
+		if _, exists := c.index[subPath]; !exists {
+			now := time.Now().UnixMilli()
+			uuid := fmt.Sprintf("folder-%d", now)
+			entry := make(FileEntry, entrySize)
+			entry[IdxType] = ".folder"
+			entry[IdxName] = parts[i-1]
+			entry[IdxLocation] = strings.Join(parts[:i-1], "/")
+			entry[IdxData] = []any{}
+			entry[IdxCreated] = now
+			entry[IdxEdited] = now
+			entry[IdxSize] = 0
+			entry[IdxUUID] = uuid
+			c.entries[uuid] = entry
+			c.index[subPath] = uuid
+			c.dirty = append(c.dirty, UpdateChange{Command: "UUIDa", UUID: uuid, Dta: entry})
+		}
+	}
+	return nil
+}
+
 func (c *Client) CreateFile(p string, data string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -192,6 +224,11 @@ func (c *Client) CreateFile(p string, data string) error {
 	dir, file := path.Split(p)
 	ext := path.Ext(file)
 	name := strings.TrimSuffix(file, ext)
+
+	if err := c.createFolders(dir); err != nil {
+		return err
+	}
+
 	uuid := fmt.Sprintf("%d", now)
 	entry := make(FileEntry, entrySize)
 	entry[IdxType] = ext
@@ -201,6 +238,37 @@ func (c *Client) CreateFile(p string, data string) error {
 	entry[IdxCreated] = now
 	entry[IdxEdited] = now
 	entry[IdxSize] = len(data)
+	entry[IdxUUID] = uuid
+	c.entries[uuid] = entry
+	c.index[p] = uuid
+	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDa", UUID: uuid, Dta: entry})
+	return nil
+}
+
+func (c *Client) CreateFolder(p string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.loadIndex(); err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	dir, file := path.Split(p)
+	ext := path.Ext(file)
+	name := strings.TrimSuffix(file, ext)
+
+	if err := c.createFolders(dir); err != nil {
+		return err
+	}
+
+	uuid := fmt.Sprintf("folder-%d", now)
+	entry := make(FileEntry, entrySize)
+	entry[IdxType] = ".folder"
+	entry[IdxName] = name
+	entry[IdxLocation] = strings.TrimSuffix(dir, "/")
+	entry[IdxData] = []any{}
+	entry[IdxCreated] = now
+	entry[IdxEdited] = now
+	entry[IdxSize] = 0
 	entry[IdxUUID] = uuid
 	c.entries[uuid] = entry
 	c.index[p] = uuid
