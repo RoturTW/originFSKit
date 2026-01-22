@@ -276,6 +276,36 @@ func (c *Client) CreateFolder(p string) error {
 	return nil
 }
 
+func (c *Client) ListDir(p string) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.loadIndex(); err != nil {
+		return nil, err
+	}
+
+	uuid, ok := c.index[p]
+	if !ok {
+		return nil, errors.New("directory not found")
+	}
+
+	rawData, ok := c.entries[uuid][IdxData].([]any)
+	if !ok {
+		return nil, errors.New("invalid folder data")
+	}
+
+	names := make([]string, 0, len(rawData))
+	for _, v := range rawData {
+		if entrySlice, ok := v.([]any); ok && len(entrySlice) > IdxName {
+			if name, ok := entrySlice[IdxName].(string); ok {
+				names = append(names, name)
+			}
+		}
+	}
+
+	return names, nil
+}
+
 func (c *Client) Remove(p string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
