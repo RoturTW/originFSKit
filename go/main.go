@@ -1,4 +1,4 @@
-package originfskit
+package main
 
 import (
 	"bytes"
