@@ -120,7 +120,13 @@ func (c *Client) loadIndex() error {
 }
 
 func entryToPath(e FileEntry) string {
-	return path.Join("/", strings.TrimPrefix(fmt.Sprint(e[IdxLocation]), "/"), fmt.Sprintf("%v%v", e[IdxName], e[IdxType]))
+	location := strings.ToLower(fmt.Sprint(e[IdxLocation]))
+	location = strings.TrimPrefix(location, "origin/(c) users/")
+
+	username := location[0:strings.Index(location, "/")]
+	location = strings.TrimPrefix(location, username+"/")
+
+	return path.Join("/", strings.TrimPrefix(location, "/"), fmt.Sprintf("%v%v", e[IdxName], e[IdxType]))
 }
 
 func clone(e FileEntry) FileEntry {
@@ -216,6 +222,21 @@ func (c *Client) Remove(p string) error {
 	delete(c.entries, uuid)
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDd", UUID: uuid})
 	return nil
+}
+
+func (c *Client) Exists(p string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.index[p]
+	return ok
+}
+
+func (c *Client) JoinPath(elem ...string) string {
+	joined := path.Join(elem...)
+	if !strings.HasPrefix(joined, "/") {
+		joined = "/" + joined
+	}
+	return joined
 }
 
 func (c *Client) Rename(oldPath, newPath string) error {
