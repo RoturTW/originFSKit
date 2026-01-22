@@ -64,6 +64,32 @@ func NewClient(token string) *Client {
 	}
 }
 
+func (c *Client) GetUuid(p string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.loadIndex(); err != nil {
+		return "", err
+	}
+	uuid, ok := c.index[strings.ToLower(p)]
+	if !ok {
+		return "", errors.New("not found")
+	}
+	return uuid, nil
+}
+
+func (c *Client) GetPath(uuid string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.loadIndex(); err != nil {
+		return "", err
+	}
+	entry, ok := c.entries[uuid]
+	if !ok {
+		return "", errors.New("not found")
+	}
+	return entryToPath(entry), nil
+}
+
 func (c *Client) request(method, p string, body any, out any) error {
 	u, _ := url.Parse(BaseURL + p)
 	q := u.Query()
@@ -111,7 +137,7 @@ func (c *Client) loadIndex() error {
 		entry := raw[i : i+entrySize]
 		uuid, _ := entry[IdxUUID].(string)
 		p := entryToPath(entry)
-		c.index[p] = uuid
+		c.index[strings.ToLower(p)] = uuid
 		c.entries[uuid] = clone(entry)
 	}
 
@@ -126,7 +152,7 @@ func entryToPath(e FileEntry) string {
 	username := location[0:strings.Index(location, "/")]
 	location = strings.TrimPrefix(location, username+"/")
 
-	return path.Join("/", strings.TrimPrefix(location, "/"), fmt.Sprintf("%v%v", e[IdxName], e[IdxType]))
+	return strings.ToLower(path.Join("/", strings.TrimPrefix(location, "/"), fmt.Sprintf("%v%v", e[IdxName], e[IdxType])))
 }
 
 func clone(e FileEntry) FileEntry {
@@ -154,8 +180,8 @@ func (c *Client) ReadFile(p string) (FileEntry, error) {
 	if err := c.loadIndex(); err != nil {
 		return nil, err
 	}
-	uuid, ok := c.index[p]
-	if !ok {
+	uuid, ok := c.GetUuid(p)
+	if ok != nil {
 		return nil, errors.New("not found")
 	}
 	return clone(c.entries[uuid]), nil
@@ -168,7 +194,7 @@ func (c *Client) WriteFile(p string, data string) error {
 		return err
 	}
 	now := time.Now().UnixMilli()
-	if uuid, ok := c.index[p]; ok {
+	if uuid, err := c.GetUuid(p); err == nil {
 		e := c.entries[uuid]
 		e[IdxData] = data
 		e[IdxEdited] = now
@@ -190,11 +216,11 @@ func (c *Client) createFolders(dir string) error {
 
 	parts := strings.Split(dir, "/")
 	for i := 1; i <= len(parts); i++ {
-		subPath := path.Join(parts[:i]...)
+		subPath := strings.ToLower(path.Join(parts[:i]...))
 		if !strings.HasPrefix(subPath, "/") {
 			subPath = "/" + subPath
 		}
-		if _, exists := c.index[subPath]; !exists {
+		if _, err := c.GetUuid(subPath); err != nil {
 			now := time.Now().UnixMilli()
 			uuid := fmt.Sprintf("folder-%d", now)
 			entry := make(FileEntry, entrySize)
@@ -215,6 +241,7 @@ func (c *Client) createFolders(dir string) error {
 }
 
 func (c *Client) CreateFile(p string, data string) error {
+	p = strings.ToLower(p)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
@@ -246,6 +273,7 @@ func (c *Client) CreateFile(p string, data string) error {
 }
 
 func (c *Client) CreateFolder(p string) error {
+	p = strings.ToLower(p)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
@@ -277,6 +305,7 @@ func (c *Client) CreateFolder(p string) error {
 }
 
 func (c *Client) ListDir(p string) ([]string, error) {
+	p = strings.ToLower(p)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -289,15 +318,22 @@ func (c *Client) ListDir(p string) ([]string, error) {
 		return nil, errors.New("directory not found")
 	}
 
-	rawData, ok := c.entries[uuid][IdxData].([]any)
+	entry := c.entries[uuid]
+
+	if fmt.Sprint(entry[IdxType]) != ".folder" {
+		return nil, errors.New("not a directory")
+	}
+
+	rawData, ok := entry[IdxData].([]any)
 	if !ok {
 		return nil, errors.New("invalid folder data")
 	}
 
 	names := make([]string, 0, len(rawData))
 	for _, v := range rawData {
-		if entrySlice, ok := v.([]any); ok && len(entrySlice) > IdxName {
-			if name, ok := entrySlice[IdxName].(string); ok {
+		if childUUID, ok := v.(string); ok {
+			if childEntry, exists := c.entries[childUUID]; exists {
+				name := fmt.Sprintf("%v%v", childEntry[IdxName], childEntry[IdxType])
 				names = append(names, name)
 			}
 		}
@@ -307,6 +343,7 @@ func (c *Client) ListDir(p string) ([]string, error) {
 }
 
 func (c *Client) Remove(p string) error {
+	p = strings.ToLower(p)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
@@ -323,6 +360,7 @@ func (c *Client) Remove(p string) error {
 }
 
 func (c *Client) Exists(p string) bool {
+	p = strings.ToLower(p)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, ok := c.index[p]
@@ -334,7 +372,7 @@ func (c *Client) JoinPath(elem ...string) string {
 	if !strings.HasPrefix(joined, "/") {
 		joined = "/" + joined
 	}
-	return joined
+	return strings.ToLower(joined)
 }
 
 func (c *Client) Rename(oldPath, newPath string) error {
@@ -343,7 +381,7 @@ func (c *Client) Rename(oldPath, newPath string) error {
 	if err := c.loadIndex(); err != nil {
 		return err
 	}
-	uuid, ok := c.index[oldPath]
+	uuid, ok := c.index[strings.ToLower(oldPath)]
 	if !ok {
 		return errors.New("not found")
 	}
@@ -358,7 +396,7 @@ func (c *Client) Rename(oldPath, newPath string) error {
 	e[IdxEdited] = now
 	c.entries[uuid] = e
 	delete(c.index, oldPath)
-	c.index[newPath] = uuid
+	c.index[strings.ToLower(newPath)] = uuid
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: ext, Idx: IdxType + 1})
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: name, Idx: IdxName + 1})
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: strings.TrimSuffix(dir, "/"), Idx: IdxLocation + 1})
