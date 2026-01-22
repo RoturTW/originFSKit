@@ -103,7 +103,7 @@ func (c *Client) loadIndex() error {
 		return nil
 	}
 	var raw []any
-	if err := c.request("GET", "/files/index", nil, &raw); err != nil {
+	if err := c.request("GET", "/files/path-index", nil, &raw); err != nil {
 		return err
 	}
 
@@ -387,7 +387,7 @@ func (c *Client) Commit() error {
 	}
 	req := UpdateFileRequest{Updates: c.dirty}
 	var res UpdateResult
-	if err := c.request("POST", "/files/update", req, &res); err != nil {
+	if err := c.request("POST", "/files", req, &res); err != nil {
 		return err
 	}
 	c.dirty = nil
