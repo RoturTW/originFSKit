@@ -41,7 +41,7 @@ All requests require `?auth={token}` query parameter.
 
 **Response**: `FileEntry` (array with 14 elements)
 
-```json
+```js
 [
   ".txt",              // [0] Type
   "filename",          // [1] Name
@@ -88,7 +88,7 @@ type GetFilesRequest struct {
 
 **Response**: `GetFilesResponse`
 
-```json
+```js
 {
   "files": {
     "uuid1": [/* FileEntry array */],
@@ -116,7 +116,7 @@ type GetFilesResponse struct {
 
 **Request**: `UpdateFileRequest`
 
-```json
+```js
 {
   "updates": [
     {
@@ -165,7 +165,7 @@ type UpdateChange struct {
 
 **Response**: `UpdateResult`
 
-```json
+```js
 {
   "payload": "success message or data"
 }
@@ -230,7 +230,7 @@ When using `UUIDr` command, add 1 to these indices:
 
 ### Create File
 
-```json
+```js
 {
   "updates": [
     {
@@ -249,7 +249,7 @@ When using `UUIDr` command, add 1 to these indices:
 
 ### Update Content
 
-```json
+```js
 {
   "updates": [
     {
@@ -276,7 +276,7 @@ When using `UUIDr` command, add 1 to these indices:
 
 ### Delete File
 
-```json
+```js
 {
   "updates": [
     {
