@@ -2,6 +2,7 @@ package originFSKit
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,14 @@ type UpdateResult struct {
 	Payload string `json:"payload"`
 }
 
+type GetFilesRequest struct {
+	UUIDs []string `json:"uuids"`
+}
+
+type GetFilesResponse struct {
+	Files map[string]FileEntry `json:"files"`
+}
+
 type Client struct {
 	Token   string
 	HTTP    *http.Client
@@ -57,19 +66,21 @@ type Client struct {
 
 func NewClient(token string) *Client {
 	return &Client{
-		Token:   token,
-		HTTP:    &http.Client{},
+		Token: token,
+		HTTP: &http.Client{
+			Timeout: 30 * time.Second, // Added timeout to prevent hanging
+		},
 		index:   map[string]string{},
 		entries: map[string]FileEntry{},
 	}
 }
 
 func (c *Client) GetUuid(p string) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
 		return "", err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	uuid, ok := c.index[strings.ToLower(p)]
 	if !ok {
 		return "", errors.New("not found")
@@ -78,9 +89,12 @@ func (c *Client) GetUuid(p string) (string, error) {
 }
 
 func (c *Client) GetPath(uuid string) (string, error) {
+	if err := c.loadIndex(); err != nil {
+		return "", err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.loadIndex(); err != nil {
+	if err := c.ensureEntry(uuid); err != nil {
 		return "", err
 	}
 	entry, ok := c.entries[uuid]
@@ -102,14 +116,21 @@ func (c *Client) request(method, p string, body any, out any) error {
 		r = bytes.NewReader(b)
 	}
 
-	req, _ := http.NewRequest(method, u.String(), r)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), r)
+	if err != nil {
+		return err
+	}
+
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -125,20 +146,78 @@ func (c *Client) request(method, p string, body any, out any) error {
 }
 
 func (c *Client) loadIndex() error {
+	c.mu.Lock()
 	if c.loaded {
+		c.mu.Unlock()
 		return nil
 	}
+	c.mu.Unlock()
+
 	var raw map[string]any
 	if err := c.request("GET", "/files/path-index", nil, &raw); err != nil {
 		return err
 	}
 
-	for k, v := range raw["index"].(map[string]any) {
-		fmt.Println(k, v)
-		c.index[cleanPath(k)] = v.(string)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.loaded {
+		return nil
+	}
+
+	indexData, ok := raw["index"].(map[string]any)
+	if !ok {
+		return errors.New("invalid index response")
+	}
+
+	for k, v := range indexData {
+		vStr, ok := v.(string)
+		if !ok {
+			continue
+		}
+		c.index[cleanPath(k)] = vStr
 	}
 
 	c.loaded = true
+	return nil
+}
+
+func (c *Client) ensureEntry(uuid string) error {
+	if _, ok := c.entries[uuid]; ok {
+		return nil
+	}
+
+	var entry FileEntry
+	if err := c.request("GET", "/files/by-uuid?uuid="+uuid, nil, &entry); err != nil {
+		return err
+	}
+
+	c.entries[uuid] = entry
+	return nil
+}
+
+func (c *Client) ensureEntries(uuids []string) error {
+	var missing []string
+	for _, uuid := range uuids {
+		if _, ok := c.entries[uuid]; !ok {
+			missing = append(missing, uuid)
+		}
+	}
+
+	if len(missing) == 0 {
+		return nil
+	}
+
+	var resp GetFilesResponse
+	req := GetFilesRequest{UUIDs: missing}
+	if err := c.request("POST", "/files/by-uuid", req, &resp); err != nil {
+		return err
+	}
+
+	for uuid, entry := range resp.Files {
+		c.entries[uuid] = entry
+	}
+
 	return nil
 }
 
@@ -153,16 +232,12 @@ func cleanPath(p string) string {
 	p = strings.ToLower(p)
 	p = strings.TrimPrefix(p, "origin/(c) users/")
 
-	fmt.Println(1, p)
-
 	parts := strings.SplitN(p, "/", 2)
 	if len(parts) == 2 {
 		p = parts[1]
 	} else {
 		p = ""
 	}
-
-	fmt.Println(2, p)
 
 	return path.Clean("/" + p)
 }
@@ -174,11 +249,11 @@ func clone(e FileEntry) FileEntry {
 }
 
 func (c *Client) ListPaths() ([]string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
 		return nil, err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	out := make([]string, 0, len(c.index))
 	for p := range c.index {
 		out = append(out, p)
@@ -187,37 +262,64 @@ func (c *Client) ListPaths() ([]string, error) {
 }
 
 func (c *Client) ReadFile(p string) (FileEntry, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
 		return nil, err
 	}
-	uuid, ok := c.GetUuid(p)
-	if ok != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	uuid, ok := c.index[strings.ToLower(p)]
+	if !ok {
 		return nil, errors.New("not found")
+	}
+	if err := c.ensureEntry(uuid); err != nil {
+		return nil, err
 	}
 	return clone(c.entries[uuid]), nil
 }
 
-func (c *Client) WriteFile(p string, data string) error {
+func (c *Client) ReadFileContent(p string) (string, error) {
+	if err := c.loadIndex(); err != nil {
+		return "", err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	uuid, ok := c.index[strings.ToLower(p)]
+	if !ok {
+		return "", errors.New("not found")
+	}
+	if err := c.ensureEntry(uuid); err != nil {
+		return "", err
+	}
+	data, ok := c.entries[uuid][IdxData].(string)
+	if !ok {
+		return "", errors.New("invalid data type")
+	}
+	return data, nil
+}
+
+func (c *Client) WriteFile(p string, data string) error {
 	if err := c.loadIndex(); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	now := time.Now().UnixMilli()
-	if uuid, err := c.GetUuid(p); err == nil {
-		e := c.entries[uuid]
-		e[IdxData] = data
-		e[IdxEdited] = now
-		e[IdxSize] = len(data)
-		c.entries[uuid] = e
-		c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: data, Idx: IdxData + 1})
-		c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: now, Idx: IdxEdited + 1})
-		c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: len(data), Idx: IdxSize + 1})
-		return nil
+	uuid, ok := c.index[strings.ToLower(p)]
+	if !ok {
+		return errors.New("create via CreateFile")
 	}
-	return errors.New("create via CreateFile")
+	if err := c.ensureEntry(uuid); err != nil {
+		return err
+	}
+	e := c.entries[uuid]
+	e[IdxData] = data
+	e[IdxEdited] = now
+	e[IdxSize] = len(data)
+	c.entries[uuid] = e
+	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: data, Idx: IdxData + 1})
+	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: now, Idx: IdxEdited + 1})
+	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: len(data), Idx: IdxSize + 1})
+	return nil
 }
 
 func (c *Client) createFolders(dir string) error {
@@ -232,7 +334,7 @@ func (c *Client) createFolders(dir string) error {
 		if !strings.HasPrefix(subPath, "/") {
 			subPath = "/" + subPath
 		}
-		if _, err := c.GetUuid(subPath); err != nil {
+		if _, ok := c.index[subPath]; !ok {
 			now := time.Now().UnixMilli()
 			uuid := fmt.Sprintf("folder-%d", now)
 			entry := make(FileEntry, entrySize)
@@ -254,11 +356,11 @@ func (c *Client) createFolders(dir string) error {
 
 func (c *Client) CreateFile(p string, data string) error {
 	p = strings.ToLower(p)
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	now := time.Now().UnixMilli()
 	dir, file := path.Split(p)
 	ext := path.Ext(file)
@@ -286,11 +388,11 @@ func (c *Client) CreateFile(p string, data string) error {
 
 func (c *Client) CreateFolder(p string) error {
 	p = strings.ToLower(p)
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	now := time.Now().UnixMilli()
 	dir, file := path.Split(p)
 	ext := path.Ext(file)
@@ -354,6 +456,9 @@ func (c *Client) ListDir(p string) []string {
 
 func (c *Client) Remove(p string) error {
 	p = strings.ToLower(p)
+	if err := c.loadIndex(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	uuid, ok := c.index[p]
@@ -368,6 +473,9 @@ func (c *Client) Remove(p string) error {
 
 func (c *Client) Exists(p string) bool {
 	p = strings.ToLower(p)
+	if err := c.loadIndex(); err != nil {
+		return false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, ok := c.index[p]
@@ -383,14 +491,17 @@ func (c *Client) JoinPath(elem ...string) string {
 }
 
 func (c *Client) Rename(oldPath, newPath string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err := c.loadIndex(); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	uuid, ok := c.index[strings.ToLower(oldPath)]
 	if !ok {
 		return errors.New("not found")
+	}
+	if err := c.ensureEntry(uuid); err != nil {
+		return err
 	}
 	e := c.entries[uuid]
 	dir, file := path.Split(newPath)
@@ -402,7 +513,7 @@ func (c *Client) Rename(oldPath, newPath string) error {
 	e[IdxLocation] = strings.TrimSuffix(dir, "/")
 	e[IdxEdited] = now
 	c.entries[uuid] = e
-	delete(c.index, oldPath)
+	delete(c.index, strings.ToLower(oldPath))
 	c.index[strings.ToLower(newPath)] = uuid
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: ext, Idx: IdxType + 1})
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: name, Idx: IdxName + 1})
@@ -412,9 +523,12 @@ func (c *Client) Rename(oldPath, newPath string) error {
 }
 
 func (c *Client) StatUUID(uuid string) (FileEntry, error) {
+	if err := c.loadIndex(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.loadIndex(); err != nil {
+	if err := c.ensureEntry(uuid); err != nil {
 		return nil, err
 	}
 	e, ok := c.entries[uuid]
