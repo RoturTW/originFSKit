@@ -3,17 +3,22 @@ package originFSKit
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
 const BaseURL = "https://api.rotur.dev"
 const entrySize = 14
 
@@ -73,6 +78,21 @@ func NewClient(token string) *Client {
 		index:   map[string]string{},
 		entries: map[string]FileEntry{},
 	}
+}
+
+func randomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[rand.Intn(len(charset))]
+	}
+	return string(b)
+}
+
+func generateUUID(username string) string {
+	data := randomString(16) + strconv.FormatInt(time.Now().UnixMilli(), 10) + username
+	md5Hash := md5.Sum([]byte(data))
+	return hex.EncodeToString(md5Hash[:])
 }
 
 func (c *Client) GetUuid(p string) (string, error) {
@@ -313,7 +333,7 @@ func (c *Client) createFolders(dir string) error {
 		}
 		if _, ok := c.index[subPath]; !ok {
 			now := time.Now().UnixMilli()
-			uuid := fmt.Sprintf("folder-%d", now)
+			uuid := generateUUID(c.username)
 			entry := make(FileEntry, entrySize)
 			entry[IdxType] = ".folder"
 			entry[IdxName] = parts[i-1]
@@ -347,7 +367,7 @@ func (c *Client) CreateFile(p string, data string) error {
 		return err
 	}
 
-	uuid := fmt.Sprintf("%d", now)
+	uuid := generateUUID(c.username)
 	entry := make(FileEntry, entrySize)
 	entry[IdxType] = ext
 	entry[IdxName] = name
@@ -379,7 +399,7 @@ func (c *Client) CreateFolder(p string) error {
 		return err
 	}
 
-	uuid := fmt.Sprintf("folder-%d", now)
+	uuid := generateUUID(c.username)
 	entry := make(FileEntry, entrySize)
 	entry[IdxType] = ".folder"
 	entry[IdxName] = name
