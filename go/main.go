@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 )
-
 const BaseURL = "https://api.rotur.dev"
 const entrySize = 14
 
@@ -69,7 +68,7 @@ func NewClient(token string) *Client {
 	return &Client{
 		Token: token,
 		HTTP: &http.Client{
-			Timeout: 30 * time.Second, // Added timeout to prevent hanging
+			Timeout: 30 * time.Second,
 		},
 		index:   map[string]string{},
 		entries: map[string]FileEntry{},
@@ -318,7 +317,7 @@ func (c *Client) createFolders(dir string) error {
 			entry := make(FileEntry, entrySize)
 			entry[IdxType] = ".folder"
 			entry[IdxName] = parts[i-1]
-			entry[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.Join(parts[:i-1], "/")
+			entry[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimPrefix(strings.TrimSuffix(strings.Join(parts[:i-1], "/"), "/"), "/")
 			entry[IdxData] = []any{}
 			entry[IdxCreated] = now
 			entry[IdxEdited] = now
@@ -352,7 +351,7 @@ func (c *Client) CreateFile(p string, data string) error {
 	entry := make(FileEntry, entrySize)
 	entry[IdxType] = ext
 	entry[IdxName] = name
-	entry[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimSuffix(dir, "/")
+	entry[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimPrefix(strings.TrimSuffix(dir, "/"), "/")
 	entry[IdxData] = data
 	entry[IdxCreated] = now
 	entry[IdxEdited] = now
@@ -488,7 +487,7 @@ func (c *Client) Rename(oldPath, newPath string) error {
 	now := time.Now().UnixMilli()
 	e[IdxType] = ext
 	e[IdxName] = name
-	e[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimSuffix(dir, "/")
+	e[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimPrefix(strings.TrimSuffix(dir, "/"), "/")
 	e[IdxEdited] = now
 	c.entries[uuid] = e
 	delete(c.index, strings.ToLower(oldPath))
