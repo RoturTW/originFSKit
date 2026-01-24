@@ -55,13 +55,14 @@ type GetFilesResponse struct {
 }
 
 type Client struct {
-	Token   string
-	HTTP    *http.Client
-	mu      sync.Mutex
-	index   map[string]string
-	entries map[string]FileEntry
-	dirty   []UpdateChange
-	loaded  bool
+	Token    string
+	HTTP     *http.Client
+	mu       sync.Mutex
+	index    map[string]string
+	entries  map[string]FileEntry
+	dirty    []UpdateChange
+	loaded   bool
+	username string
 }
 
 func NewClient(token string) *Client {
@@ -165,6 +166,8 @@ func (c *Client) loadIndex() error {
 		return nil
 	}
 
+	c.username = raw["username"].(string)
+
 	indexData, ok := raw["index"].(map[string]any)
 	if !ok {
 		return errors.New("invalid index response")
@@ -193,31 +196,6 @@ func (c *Client) ensureEntry(uuid string) error {
 	}
 
 	c.entries[uuid] = entry
-	return nil
-}
-
-func (c *Client) ensureEntries(uuids []string) error {
-	var missing []string
-	for _, uuid := range uuids {
-		if _, ok := c.entries[uuid]; !ok {
-			missing = append(missing, uuid)
-		}
-	}
-
-	if len(missing) == 0 {
-		return nil
-	}
-
-	var resp GetFilesResponse
-	req := GetFilesRequest{UUIDs: missing}
-	if err := c.request("POST", "/files/by-uuid", req, &resp); err != nil {
-		return err
-	}
-
-	for uuid, entry := range resp.Files {
-		c.entries[uuid] = entry
-	}
-
 	return nil
 }
 
@@ -340,7 +318,7 @@ func (c *Client) createFolders(dir string) error {
 			entry := make(FileEntry, entrySize)
 			entry[IdxType] = ".folder"
 			entry[IdxName] = parts[i-1]
-			entry[IdxLocation] = strings.Join(parts[:i-1], "/")
+			entry[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.Join(parts[:i-1], "/")
 			entry[IdxData] = []any{}
 			entry[IdxCreated] = now
 			entry[IdxEdited] = now
@@ -374,7 +352,7 @@ func (c *Client) CreateFile(p string, data string) error {
 	entry := make(FileEntry, entrySize)
 	entry[IdxType] = ext
 	entry[IdxName] = name
-	entry[IdxLocation] = strings.TrimSuffix(dir, "/")
+	entry[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimSuffix(dir, "/")
 	entry[IdxData] = data
 	entry[IdxCreated] = now
 	entry[IdxEdited] = now
@@ -510,14 +488,14 @@ func (c *Client) Rename(oldPath, newPath string) error {
 	now := time.Now().UnixMilli()
 	e[IdxType] = ext
 	e[IdxName] = name
-	e[IdxLocation] = strings.TrimSuffix(dir, "/")
+	e[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimSuffix(dir, "/")
 	e[IdxEdited] = now
 	c.entries[uuid] = e
 	delete(c.index, strings.ToLower(oldPath))
 	c.index[strings.ToLower(newPath)] = uuid
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: ext, Idx: IdxType + 1})
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: name, Idx: IdxName + 1})
-	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: strings.TrimSuffix(dir, "/"), Idx: IdxLocation + 1})
+	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: e[IdxLocation], Idx: IdxLocation + 1})
 	c.dirty = append(c.dirty, UpdateChange{Command: "UUIDr", UUID: uuid, Dta: now, Idx: IdxEdited + 1})
 	return nil
 }
