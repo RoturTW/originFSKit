@@ -319,6 +319,13 @@ func (c *Client) WriteFile(p string, data string) error {
 	return nil
 }
 
+func (c *Client) formatPath(dir string) string {
+	basePath := "origin/(c) users/" + c.username + "/"
+
+	formatted := strings.Trim(strings.Join(parts[:i-1], "/"), "/")
+	return strings.Trim(basePath+formatted, "/")
+}
+
 func (c *Client) createFolders(dir string) error {
 	dir = strings.TrimSuffix(dir, "/")
 	if dir == "" || dir == "/" {
@@ -337,7 +344,7 @@ func (c *Client) createFolders(dir string) error {
 			entry := make(FileEntry, entrySize)
 			entry[IdxType] = ".folder"
 			entry[IdxName] = parts[i-1]
-			entry[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimPrefix(strings.TrimSuffix(strings.Join(parts[:i-1], "/"), "/"), "/")
+			entry[IdxLocation] = c.formatPath(strings.Join(parts[:i-1], "/"))
 			entry[IdxData] = []any{}
 			entry[IdxCreated] = now
 			entry[IdxEdited] = now
@@ -371,7 +378,7 @@ func (c *Client) CreateFile(p string, data string) error {
 	entry := make(FileEntry, entrySize)
 	entry[IdxType] = ext
 	entry[IdxName] = name
-	entry[IdxLocation] = "origin/(c) users/" + c.username + "/" + strings.TrimPrefix(strings.TrimSuffix(dir, "/"), "/")
+	entry[IdxLocation] = c.formatPath(dir)
 	entry[IdxData] = data
 	entry[IdxCreated] = now
 	entry[IdxEdited] = now
@@ -403,7 +410,7 @@ func (c *Client) CreateFolder(p string) error {
 	entry := make(FileEntry, entrySize)
 	entry[IdxType] = ".folder"
 	entry[IdxName] = name
-	entry[IdxLocation] = strings.TrimSuffix(dir, "/")
+	entry[IdxLocation] = c.formatPath(dir)
 	entry[IdxData] = []any{}
 	entry[IdxCreated] = now
 	entry[IdxEdited] = now
