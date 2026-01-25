@@ -322,7 +322,7 @@ func (c *Client) WriteFile(p string, data string) error {
 func (c *Client) formatPath(dir string) string {
 	basePath := "origin/(c) users/" + c.username + "/"
 
-	formatted := strings.Trim(strings.Join(parts[:i-1], "/"), "/")
+	formatted := strings.Trim(dir, "/")
 	return strings.Trim(basePath+formatted, "/")
 }
 
