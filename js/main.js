@@ -1,0 +1,404 @@
+const BASE_URL = 'https://api.rotur.dev';
+const ENTRY_SIZE = 14;
+
+const IDX = {
+  TYPE: 0,
+  NAME: 1,
+  LOCATION: 2,
+  DATA: 3,
+  CREATED: 8,
+  EDITED: 9,
+  SIZE: 11,
+  UUID: 13
+};
+
+async function md5(text) {
+  if (crypto.subtle) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(text);
+    const hashBuffer = await crypto.subtle.digest('SHA-1', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return hashHex.substring(0, 32);
+  } else {
+    let hash = 0;
+    for (let i = 0; i < text.length; i++) {
+      const char = text.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;
+    }
+    return Math.abs(hash).toString(16).padStart(32, '0');
+  }
+}
+
+class OriginFSClient {
+  constructor(token) {
+    this.token = token;
+    this.index = {};
+    this.entries = {};
+    this.dirty = [];
+    this.loaded = false;
+    this.username = '';
+  }
+
+  async request(method, path, body = null) {
+    const url = new URL(BASE_URL + path);
+    url.searchParams.set('auth', this.token);
+
+    const options = {
+      method,
+      headers: {},
+    };
+
+    if (body !== null) {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(body);
+    }
+
+    const response = await fetch(url.toString(), options);
+
+    if (response.status !== 200) {
+      const text = await response.text();
+      throw new Error(`HTTP ${response.status}: ${text}`);
+    }
+
+    try {
+        const json = JSON.parse(await response.text());
+        if (json.error) {
+            throw new Error(json.error);
+        }
+        return json;
+    } catch (e) {
+        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+  }
+
+  async loadIndex() {
+    if (this.loaded) {
+      return;
+    }
+
+    const raw = await this.request('GET', '/files/path-index');
+
+    this.username = raw.username;
+
+    const indexData = raw.index || {};
+    for (const [key, value] of Object.entries(indexData)) {
+      if (typeof value === 'string') {
+        this.index[this.cleanPath(key)] = value;
+      }
+    }
+
+    this.loaded = true;
+  }
+
+  async ensureEntry(uuid) {
+    if (this.entries[uuid]) {
+      return;
+    }
+
+    const entry = await this.request('GET', `/files/by-uuid?uuid=${uuid}`);
+    this.entries[uuid] = entry;
+  }
+
+  cleanPath(p) {
+    p = p.toLowerCase();
+    p = p.replace(/^origin\/\(c\) users\//, '');
+
+    const parts = p.split('/');
+    if (parts.length >= 2) {
+      p = parts.slice(1).join('/');
+    } else {
+      p = '';
+    }
+
+    // Normalize path
+    p = ('/' + p).replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+    return p;
+  }
+
+  entryToPath(entry) {
+    const location = String(entry[IDX.LOCATION]);
+    const name = String(entry[IDX.NAME]);
+    const type = String(entry[IDX.TYPE]);
+    const rawPath = location.replace(/^\//, '') + '/' + name + type;
+    return this.cleanPath(rawPath);
+  }
+
+  formatPath(dir) {
+    const basePath = `origin/(c) users/${this.username}/`;
+    const formatted = dir.replace(/^\/|\/$/g, '');
+    return (basePath + formatted).replace(/\/$/, '');
+  }
+
+  randomString(length) {
+    const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+      result += charset.charAt(Math.floor(Math.random() * charset.length));
+    }
+    return result;
+  }
+
+  async generateUUID(username) {
+    const data = this.randomString(16) + Date.now().toString() + username;
+    return await md5(data);
+  }
+
+  cloneEntry(entry) {
+    return [...entry];
+  }
+
+  async getUuid(path) {
+    await this.loadIndex();
+    const uuid = this.index[path.toLowerCase()];
+    if (!uuid) {
+      throw new Error('not found');
+    }
+    return uuid;
+  }
+
+  async getPath(uuid) {
+    await this.loadIndex();
+    await this.ensureEntry(uuid);
+    const entry = this.entries[uuid];
+    if (!entry) {
+      throw new Error('not found');
+    }
+    return this.entryToPath(entry);
+  }
+
+  async listPaths() {
+    await this.loadIndex();
+    return Object.keys(this.index);
+  }
+
+  async readFile(path) {
+    await this.loadIndex();
+    const uuid = this.index[path.toLowerCase()];
+    if (!uuid) {
+      throw new Error('not found');
+    }
+    await this.ensureEntry(uuid);
+    return this.cloneEntry(this.entries[uuid]);
+  }
+
+  async readFileContent(path) {
+    await this.loadIndex();
+    const uuid = this.index[path.toLowerCase()];
+    if (!uuid) {
+      throw new Error('not found');
+    }
+    await this.ensureEntry(uuid);
+    const data = this.entries[uuid][IDX.DATA];
+    if (typeof data !== 'string') {
+      throw new Error('invalid data type');
+    }
+    return data;
+  }
+
+  async writeFile(path, data) {
+    await this.loadIndex();
+    const now = Date.now();
+    const uuid = this.index[path.toLowerCase()];
+    if (!uuid) {
+      throw new Error('create via createFile');
+    }
+    await this.ensureEntry(uuid);
+    const entry = this.entries[uuid];
+    entry[IDX.DATA] = data;
+    entry[IDX.EDITED] = now;
+    entry[IDX.SIZE] = data.length;
+    this.entries[uuid] = entry;
+    this.dirty.push({ command: 'UUIDr', uuid, dta: data, idx: IDX.DATA + 1 });
+    this.dirty.push({ command: 'UUIDr', uuid, dta: now, idx: IDX.EDITED + 1 });
+    this.dirty.push({ command: 'UUIDr', uuid, dta: data.length, idx: IDX.SIZE + 1 });
+  }
+
+  async createFolders(dir) {
+    dir = dir.replace(/\/$/, '');
+    if (!dir || dir === '/') {
+      return;
+    }
+
+    const parts = dir.split('/').filter(p => p);
+    for (let i = 1; i <= parts.length; i++) {
+      let subPath = '/' + parts.slice(0, i).join('/');
+      subPath = subPath.toLowerCase();
+      
+      if (!this.index[subPath]) {
+        const now = Date.now();
+        const uuid = await this.generateUUID(this.username);
+        const entry = new Array(ENTRY_SIZE);
+        entry[IDX.TYPE] = '.folder';
+        entry[IDX.NAME] = parts[i - 1];
+        entry[IDX.LOCATION] = this.formatPath(parts.slice(0, i - 1).join('/'));
+        entry[IDX.DATA] = [];
+        entry[IDX.CREATED] = now;
+        entry[IDX.EDITED] = now;
+        entry[IDX.SIZE] = 0;
+        entry[IDX.UUID] = uuid;
+        this.entries[uuid] = entry;
+        this.index[subPath] = uuid;
+        this.dirty.push({ command: 'UUIDa', uuid, dta: entry });
+      }
+    }
+  }
+
+  async createFile(path, data) {
+    path = path.toLowerCase();
+    await this.loadIndex();
+    const now = Date.now();
+    const lastSlash = path.lastIndexOf('/');
+    const dir = lastSlash >= 0 ? path.substring(0, lastSlash) : '';
+    const file = lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
+    const lastDot = file.lastIndexOf('.');
+    const ext = lastDot >= 0 ? file.substring(lastDot) : '';
+    const name = lastDot >= 0 ? file.substring(0, lastDot) : file;
+
+    await this.createFolders(dir);
+
+    const uuid = await this.generateUUID(this.username);
+    const entry = new Array(ENTRY_SIZE);
+    entry[IDX.TYPE] = ext;
+    entry[IDX.NAME] = name;
+    entry[IDX.LOCATION] = this.formatPath(dir);
+    entry[IDX.DATA] = data;
+    entry[IDX.CREATED] = now;
+    entry[IDX.EDITED] = now;
+    entry[IDX.SIZE] = data.length;
+    entry[IDX.UUID] = uuid;
+    this.entries[uuid] = entry;
+    this.index[path] = uuid;
+    this.dirty.push({ command: 'UUIDa', uuid, dta: entry });
+  }
+
+  async createFolder(path) {
+    path = path.toLowerCase();
+    await this.loadIndex();
+    const now = Date.now();
+    const lastSlash = path.lastIndexOf('/');
+    const dir = lastSlash >= 0 ? path.substring(0, lastSlash) : '';
+    const file = lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
+    const lastDot = file.lastIndexOf('.');
+    const name = lastDot >= 0 ? file.substring(0, lastDot) : file;
+
+    await this.createFolders(dir);
+
+    const uuid = await this.generateUUID(this.username);
+    const entry = new Array(ENTRY_SIZE);
+    entry[IDX.TYPE] = '.folder';
+    entry[IDX.NAME] = name;
+    entry[IDX.LOCATION] = this.formatPath(dir);
+    entry[IDX.DATA] = [];
+    entry[IDX.CREATED] = now;
+    entry[IDX.EDITED] = now;
+    entry[IDX.SIZE] = 0;
+    entry[IDX.UUID] = uuid;
+    this.entries[uuid] = entry;
+    this.index[path] = uuid;
+    this.dirty.push({ command: 'UUIDa', uuid, dta: entry });
+  }
+
+  async listDir(path) {
+    path = path.toLowerCase().replace(/\/$/, '');
+    if (!path) {
+      path = '/';
+    }
+
+    const paths = await this.listPaths();
+    const children = new Set();
+    const prefix = path === '/' ? '/' : path + '/';
+
+    for (const fullPath of paths) {
+      if (fullPath.startsWith(prefix)) {
+        const rest = fullPath.substring(prefix.length);
+        const firstSlash = rest.indexOf('/');
+        const child = firstSlash >= 0 ? rest.substring(0, firstSlash) : rest;
+        children.add(child);
+      }
+    }
+
+    return Array.from(children);
+  }
+
+  async remove(path) {
+    path = path.toLowerCase();
+    await this.loadIndex();
+    const uuid = this.index[path];
+    if (!uuid) {
+      throw new Error('not found');
+    }
+    delete this.index[path];
+    delete this.entries[uuid];
+    this.dirty.push({ command: 'UUIDd', uuid });
+  }
+
+  async exists(path) {
+    path = path.toLowerCase();
+    try {
+      await this.loadIndex();
+      return !!this.index[path];
+    } catch {
+      return false;
+    }
+  }
+
+  joinPath(...elements) {
+    let joined = elements.join('/').replace(/\/+/g, '/').replace(/\/$/, '');
+    if (!joined.startsWith('/')) {
+      joined = '/' + joined;
+    }
+    return joined.toLowerCase();
+  }
+
+  async rename(oldPath, newPath) {
+    await this.loadIndex();
+    const uuid = this.index[oldPath.toLowerCase()];
+    if (!uuid) {
+      throw new Error('not found');
+    }
+    await this.ensureEntry(uuid);
+    const entry = this.entries[uuid];
+    const lastSlash = newPath.lastIndexOf('/');
+    const dir = lastSlash >= 0 ? newPath.substring(0, lastSlash) : '';
+    const file = lastSlash >= 0 ? newPath.substring(lastSlash + 1) : newPath;
+    const lastDot = file.lastIndexOf('.');
+    const ext = lastDot >= 0 ? file.substring(lastDot) : '';
+    const name = lastDot >= 0 ? file.substring(0, lastDot) : file;
+    const now = Date.now();
+    
+    entry[IDX.TYPE] = ext;
+    entry[IDX.NAME] = name;
+    entry[IDX.LOCATION] = `origin/(c) users/${this.username}/${dir.replace(/^\/|\/$/g, '')}`;
+    entry[IDX.EDITED] = now;
+    this.entries[uuid] = entry;
+    delete this.index[oldPath.toLowerCase()];
+    this.index[newPath.toLowerCase()] = uuid;
+    this.dirty.push({ command: 'UUIDr', uuid, dta: ext, idx: IDX.TYPE + 1 });
+    this.dirty.push({ command: 'UUIDr', uuid, dta: name, idx: IDX.NAME + 1 });
+    this.dirty.push({ command: 'UUIDr', uuid, dta: entry[IDX.LOCATION], idx: IDX.LOCATION + 1 });
+    this.dirty.push({ command: 'UUIDr', uuid, dta: now, idx: IDX.EDITED + 1 });
+  }
+
+  async statUUID(uuid) {
+    await this.loadIndex();
+    await this.ensureEntry(uuid);
+    const entry = this.entries[uuid];
+    if (!entry) {
+      throw new Error('not found');
+    }
+    return this.cloneEntry(entry);
+  }
+
+  async commit() {
+    if (this.dirty.length === 0) {
+      return;
+    }
+    const req = { updates: this.dirty };
+    await this.request('POST', '/files', req);
+    this.dirty = [];
+  }
+}
+
+window.originFSKit = { OriginFSClient, IDX };
